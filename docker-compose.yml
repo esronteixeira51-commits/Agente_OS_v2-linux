@@ -1,0 +1,178 @@
+version: "3.9"
+
+# =========================================================================
+# Agent OS — docker-compose.yml — FASE 1 (Prototipo)
+# Hardware alvo: Ryzen 7 5700G + RTX 5050 8GB + 32GB RAM
+#
+# CONVENCAO DE NOMES (ver ADR-0002):
+# Cada servico e nomeado pelo PAPEL que cumpre na arquitetura, nao pela
+# tecnologia especifica. Isso e o que permite trocar chromadb -> qdrant,
+# ou sqlite -> postgres na Fase 2 sem alterar nenhuma referencia no resto
+# do sistema — so a definicao deste servico muda.
+#
+# LM Studio NAO esta neste compose de proposito: ele roda nativo no host
+# (fora de container) para ter acesso direto ao driver da GPU sem
+# complexidade extra de passthrough. O agent-os-api se conecta a ele via
+# variavel de ambiente LLM_ENDPOINT (ver .env.example).
+#
+# ATUALIZACAO: Adicionado servico web-frontend (React + Vite) para
+# interface web de interacao com o Agente.
+# =========================================================================
+
+services:
+
+  # -----------------------------------------------------------------
+  # Camada de API — envolve o LM Studio, nunca as Skills chamam o
+  # LM Studio direto. Isso e o que garante que trocar para vLLM na
+  # Fase 2 seja transparente para todo o resto do Agent OS.
+  # -----------------------------------------------------------------
+  agent-os-api:
+    build:
+      context: ./services/agent-os-api
+      dockerfile: Dockerfile
+    container_name: agent-os-api
+    ports:
+      - "8080:8080"
+    environment:
+      - LLM_ENDPOINT=${LLM_ENDPOINT}          # ex: http://host.docker.internal:1234/v1
+      - VECTOR_DB_URL=http://vector-db:8000
+      - RELATIONAL_DB_PATH=/data/agent_os.db  # SQLite — arquivo, nao servico
+      - SEARCH_ENDPOINT=http://search:8080
+      - OCR_ENDPOINT=http://ocr-worker:8090
+      - TRANSCRIPTION_ENDPOINT=http://transcription-worker:8095
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data/sqlite:/data
+      - ./data/logs:/var/log/agent-os
+      # Mesmo caminho montado no ocr-worker — e assim que o file_path
+      # que o agent-os-api recebe na Envelope e enxergado igualmente
+      # pelos dois containers, sem precisar transferir o arquivo em si.
+      - ./data/documents:/documents
+      # Mesma logica para audio, compartilhado com transcription-worker.
+      - ./data/audio:/audio
+    depends_on:
+      - vector-db
+      - search
+      - ocr-worker
+      - transcription-worker
+    networks:
+      - agent-os-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # permite alcancar o LM Studio no host
+
+  # -----------------------------------------------------------------
+  # Vector DB — papel: armazenar embeddings da base de conhecimento.
+  # Fase 1: ChromaDB embutido em container simples.
+  # Fase 2: mesmo nome de servico, imagem troca para Qdrant.
+  #
+  # VERSAO FIXADA DE PROPOSITO (nao usar :latest aqui): o cliente
+  # Python (chromadb==0.5.23 em requirements.txt) e o servidor
+  # PRECISAM estar na mesma versao. A equipe do ChromaDB documenta
+  # mudancas que quebram compatibilidade entre versoes de cliente e
+  # servidor (ex: validacao de tenant/database mudou entre a API v1 e
+  # v2). Usar :latest aqui faria o servidor evoluir sozinho com o
+  # tempo e sair de sincronia com o cliente fixado — foi exatamente
+  # isso que causou uma falha real (HTTP 400) no teste de fumaca
+  # deste projeto. Ver ADR-0011.
+  # -----------------------------------------------------------------
+  vector-db:
+    image: chromadb/chroma:0.5.23
+    container_name: vector-db
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/vector-db:/chroma/chroma
+    networks:
+      - agent-os-net
+
+  # -----------------------------------------------------------------
+  # Automacao de negocio (courier / loja) — permanece igual em
+  # todas as fases, so passa a integrar com o Agent OS via webhook
+  # apontando para agent-os-api a partir da Fase 2.
+  # -----------------------------------------------------------------
+  automation:
+    image: n8nio/n8n:latest
+    container_name: automation
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - GENERIC_TIMEZONE=America/Araguaina
+    volumes:
+      - ./data/n8n:/home/node/.n8n
+    networks:
+      - agent-os-net
+
+  # -----------------------------------------------------------------
+  # Busca web self-hosted — usado pela Skill de pesquisa (Researcher
+  # Agent), evita dependencia de API paga de busca.
+  # -----------------------------------------------------------------
+  search:
+    image: searxng/searxng:latest
+    container_name: search
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./config/searxng:/etc/searxng
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    networks:
+      - agent-os-net
+
+  # -----------------------------------------------------------------
+  # OCR — worker dedicado, roda 100% em CPU de proposito (nao disputa
+  # VRAM com o LM Studio, que ja usa quase toda a RTX 5050).
+  # -----------------------------------------------------------------
+  ocr-worker:
+    build:
+      context: ./services/ocr-worker
+      dockerfile: Dockerfile
+    container_name: ocr-worker
+    ports:
+      - "8090:8090"   # exposto para depuracao manual; uso normal e interno a rede
+    volumes:
+      - ./data/documents:/documents
+    networks:
+      - agent-os-net
+
+  # -----------------------------------------------------------------
+  # Transcricao de audio — faster-whisper (CPU, int8), tambem em CPU
+  # pelo mesmo motivo do OCR: preservar VRAM para o modelo principal.
+  # Modelo ja embutido na imagem em tempo de build (Local First).
+  # -----------------------------------------------------------------
+  transcription-worker:
+    build:
+      context: ./services/transcription-worker
+      dockerfile: Dockerfile
+    container_name: transcription-worker
+    ports:
+      - "8095:8095"   # exposto para depuracao manual
+    volumes:
+      - ./data/audio:/audio
+    networks:
+      - agent-os-net
+
+  # -----------------------------------------------------------------
+  # Interface Web — Frontend React + Vite para interacao com o Agent OS.
+  # Acessivel em http://localhost:3000
+  # Comunica com agent-os-api via HTTP na porta 8080.
+  # -----------------------------------------------------------------
+  web-frontend:
+    build:
+      context: ./services/web-frontend
+      dockerfile: Dockerfile
+    container_name: web-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8080
+      - VITE_LLM_ENDPOINT=http://localhost:1234/v1
+    depends_on:
+      - agent-os-api
+    networks:
+      - agent-os-net
+
+networks:
+  agent-os-net:
+    driver: bridge

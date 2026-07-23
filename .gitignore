@@ -1,0 +1,26 @@
+# Segredos — nunca versionar
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+
+# Banco de dados local (SQLite)
+*.db
+*.sqlite3
+
+# Editor / SO
+.vscode/
+.idea/
+.DS_Store
+
+# Docker
+*.log
