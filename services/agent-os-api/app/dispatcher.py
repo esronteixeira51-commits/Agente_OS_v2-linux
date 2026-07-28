@@ -31,6 +31,7 @@ import time
 from typing import Awaitable, Callable
 
 from app.calculator_engine import CalculatorError, evaluate as calculate_expression
+from app.llm_client import LLMTimeoutError, LLMUpstreamError, call_llm
 from app.schemas import Envelope, ErrorCode, make_error, make_result, validate_domain_if_required
 
 DispatchResult = tuple[Envelope, float, str]
@@ -111,10 +112,11 @@ async def dispatch(envelope: Envelope) -> DispatchResult:
 
 
 # =========================================================================
-# tool.calculator — único handler já implementado nesta fase. Os demais
-# (tool.llm_call, tool.ocr_extract, tool.transcribe_audio, tool.chromadb_add,
-# skill.rag_search, agent.critic) chegam nas próximas fases, cada um
-# trazendo seu próprio register_handler() quando o módulo dele nascer.
+# tool.calculator e tool.llm_call — handlers desta fase. Os demais
+# (tool.ocr_extract, tool.transcribe_audio, tool.chromadb_add,
+# skill.rag_search) chegam nas próximas fases, cada um trazendo seu
+# próprio register_handler() quando o módulo dele nascer. agent.critic
+# e agent.researcher se auto-registram a partir de app.agents — ver lá.
 # =========================================================================
 
 async def _handle_calculator(envelope: Envelope, start: float) -> DispatchResult:
@@ -157,4 +159,60 @@ register_handler(
     "tool.calculator",
     {"read_only", "execute_sandboxed", "execute_with_confirmation", "full_access"},
     _handle_calculator,
+)
+
+
+async def _handle_llm_call(envelope: Envelope, start: float) -> DispatchResult:
+    payload = envelope.payload
+    messages = payload.get("messages")
+    if not messages:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return (
+            make_error(envelope, ErrorCode.INVALID_INPUT, "payload.messages é obrigatório"),
+            latency_ms,
+            "error",
+        )
+
+    try:
+        raw_response = await call_llm(
+            messages=messages,
+            model=payload.get("model", "local-model"),
+            temperature=payload.get("temperature", 0.3),
+            tools=payload.get("tools"),
+            tool_choice=payload.get("tool_choice", "auto"),
+            max_tokens=payload.get("max_tokens"),
+        )
+    except LLMTimeoutError:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return (
+            make_error(envelope, ErrorCode.TOOL_TIMEOUT, "Motor de LLM não respondeu a tempo", recoverable=True),
+            latency_ms,
+            "error",
+        )
+    except LLMUpstreamError as exc:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return (
+            make_error(envelope, ErrorCode.UPSTREAM_UNAVAILABLE, str(exc), recoverable=True),
+            latency_ms,
+            "error",
+        )
+
+    latency_ms = (time.perf_counter() - start) * 1000
+    result = make_result(
+        envelope,
+        payload={"status": "success", "result": raw_response},
+        meta={
+            "engine": "lm-studio",
+            "latency_ms": round(latency_ms, 1),
+            "tokens_input": raw_response.get("usage", {}).get("prompt_tokens"),
+            "tokens_output": raw_response.get("usage", {}).get("completion_tokens"),
+        },
+    )
+    return result, latency_ms, "success"
+
+
+register_handler(
+    "tool.llm_call",
+    {"read_only", "execute_sandboxed", "execute_with_confirmation", "full_access"},
+    _handle_llm_call,
 )
