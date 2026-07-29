@@ -31,6 +31,7 @@ import time
 from typing import Awaitable, Callable
 
 from app.calculator_engine import CalculatorError, evaluate as calculate_expression
+from app.chromadb_client import VectorDBError, add_documents, search as chromadb_search
 from app.llm_client import LLMTimeoutError, LLMUpstreamError, call_llm
 from app.schemas import Envelope, ErrorCode, make_error, make_result, validate_domain_if_required
 
@@ -112,11 +113,12 @@ async def dispatch(envelope: Envelope) -> DispatchResult:
 
 
 # =========================================================================
-# tool.calculator e tool.llm_call — handlers desta fase. Os demais
-# (tool.ocr_extract, tool.transcribe_audio, tool.chromadb_add,
-# skill.rag_search) chegam nas próximas fases, cada um trazendo seu
-# próprio register_handler() quando o módulo dele nascer. agent.critic
-# e agent.researcher se auto-registram a partir de app.agents — ver lá.
+# tool.calculator, tool.llm_call, skill.rag_search e tool.chromadb_add —
+# handlers já implementados. Os demais (tool.ocr_extract,
+# tool.transcribe_audio) chegam nas próximas fases, cada um trazendo
+# seu próprio register_handler() quando o módulo dele nascer.
+# agent.critic e agent.researcher se auto-registram a partir de
+# app.agents — ver lá.
 # =========================================================================
 
 async def _handle_calculator(envelope: Envelope, start: float) -> DispatchResult:
@@ -215,4 +217,93 @@ register_handler(
     "tool.llm_call",
     {"read_only", "execute_sandboxed", "execute_with_confirmation", "full_access"},
     _handle_llm_call,
+)
+
+
+async def _handle_rag_search(envelope: Envelope, start: float) -> DispatchResult:
+    query = envelope.payload.get("query")
+    if not query or not isinstance(query, str):
+        latency_ms = (time.perf_counter() - start) * 1000
+        return (
+            make_error(envelope, ErrorCode.INVALID_INPUT, "payload.query é obrigatório e deve ser texto"),
+            latency_ms,
+            "error",
+        )
+
+    # context.domain já foi validado centralmente em dispatch() (ADR-0008,
+    # DOMAIN_REQUIRED_TARGETS) antes deste handler ser chamado.
+    domain = envelope.context["domain"]
+    n_results = envelope.payload.get("n_results", 5)
+
+    try:
+        matches = await asyncio.to_thread(chromadb_search, domain, query, n_results)
+    except VectorDBError as exc:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return (
+            make_error(envelope, ErrorCode.UPSTREAM_UNAVAILABLE, str(exc), recoverable=True),
+            latency_ms,
+            "error",
+        )
+
+    latency_ms = (time.perf_counter() - start) * 1000
+    result = make_result(
+        envelope,
+        payload={"status": "success", "result": {"matches": matches}},
+        meta={"engine": "chromadb", "latency_ms": round(latency_ms, 1), "matches_found": len(matches)},
+    )
+    return result, latency_ms, "success"
+
+
+register_handler(
+    "skill.rag_search",
+    {"read_only", "execute_sandboxed", "execute_with_confirmation", "full_access"},
+    _handle_rag_search,
+)
+
+
+async def _handle_chromadb_add(envelope: Envelope, start: float) -> DispatchResult:
+    documents = envelope.payload.get("documents")
+    ids = envelope.payload.get("ids")
+    if not documents or not isinstance(documents, list):
+        latency_ms = (time.perf_counter() - start) * 1000
+        return (
+            make_error(envelope, ErrorCode.INVALID_INPUT, "payload.documents é obrigatório e deve ser uma lista"),
+            latency_ms,
+            "error",
+        )
+    if not ids or not isinstance(ids, list) or len(ids) != len(documents):
+        latency_ms = (time.perf_counter() - start) * 1000
+        return (
+            make_error(envelope, ErrorCode.INVALID_INPUT, "payload.ids é obrigatório e deve ter o mesmo tamanho de documents"),
+            latency_ms,
+            "error",
+        )
+
+    # context.domain já foi validado centralmente em dispatch() (ADR-0008).
+    domain = envelope.context["domain"]
+    metadatas = envelope.payload.get("metadatas")
+
+    try:
+        added_count = await asyncio.to_thread(add_documents, domain, documents, ids, metadatas)
+    except VectorDBError as exc:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return (
+            make_error(envelope, ErrorCode.UPSTREAM_UNAVAILABLE, str(exc), recoverable=True),
+            latency_ms,
+            "error",
+        )
+
+    latency_ms = (time.perf_counter() - start) * 1000
+    result = make_result(
+        envelope,
+        payload={"status": "success", "result": {"documents_added": added_count}},
+        meta={"engine": "chromadb", "latency_ms": round(latency_ms, 1)},
+    )
+    return result, latency_ms, "success"
+
+
+register_handler(
+    "tool.chromadb_add",
+    {"execute_sandboxed", "execute_with_confirmation", "full_access"},
+    _handle_chromadb_add,
 )

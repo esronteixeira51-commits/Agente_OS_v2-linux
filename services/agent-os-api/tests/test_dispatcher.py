@@ -201,3 +201,115 @@ class TestCalculatorHandlerEndToEnd:
 
         assert response.type == "error"
         assert response.payload["error_code"] == ErrorCode.INVALID_INPUT.value
+
+
+# ---------------------------------------------------------------------------
+# skill.rag_search — handler real, ponta a ponta (chromadb_search mockado
+# no ponto de uso dentro de dispatcher.py, sem precisar de um servidor
+# ChromaDB real — isso já é coberto à parte em test_chromadb_client.py)
+# ---------------------------------------------------------------------------
+
+class TestRagSearchHandlerEndToEnd:
+    def test_success_returns_matches(self, monkeypatch):
+        fake_matches = [{"id": "d1", "text": "texto", "metadata": {}, "distance": 0.1}]
+        monkeypatch.setattr("app.dispatcher.chromadb_search", lambda domain, query, n: fake_matches)
+
+        req = _request(
+            "skill.rag_search",
+            payload={"query": "pergunta"},
+            context={"domain": "matematica"},
+            permissions={"level": "read_only"},
+        )
+        response, _latency, log_level = _run(dispatch(req))
+
+        assert response.type == "result"
+        assert response.payload["result"]["matches"] == fake_matches
+        assert log_level == "success"
+
+    def test_missing_query_returns_invalid_input(self):
+        req = _request(
+            "skill.rag_search", payload={}, context={"domain": "matematica"},
+            permissions={"level": "read_only"},
+        )
+        response, _latency, _log = _run(dispatch(req))
+        assert response.payload["error_code"] == ErrorCode.INVALID_INPUT.value
+
+    def test_missing_domain_blocked_before_handler_runs(self):
+        # Cobertura end-to-end (handler real, não um fake) do mesmo
+        # comportamento já testado com handler falso em TestDomainIsolation.
+        req = _request(
+            "skill.rag_search", payload={"query": "x"}, context={},
+            permissions={"level": "read_only"},
+        )
+        response, _latency, _log = _run(dispatch(req))
+        assert response.payload["error_code"] == ErrorCode.INVALID_INPUT.value
+
+    def test_vectordb_error_is_recoverable(self, monkeypatch):
+        from app.chromadb_client import VectorDBError
+
+        def _raise(domain, query, n):
+            raise VectorDBError("vector-db fora do ar")
+
+        monkeypatch.setattr("app.dispatcher.chromadb_search", _raise)
+
+        req = _request(
+            "skill.rag_search", payload={"query": "x"}, context={"domain": "matematica"},
+            permissions={"level": "read_only"},
+        )
+        response, _latency, _log = _run(dispatch(req))
+
+        assert response.payload["error_code"] == ErrorCode.UPSTREAM_UNAVAILABLE.value
+        assert response.payload["recoverable"] is True
+
+
+# ---------------------------------------------------------------------------
+# tool.chromadb_add — handler real, ponta a ponta
+# ---------------------------------------------------------------------------
+
+class TestChromadbAddHandlerEndToEnd:
+    def test_success_returns_documents_added_count(self, monkeypatch):
+        monkeypatch.setattr("app.dispatcher.add_documents", lambda domain, docs, ids, meta: len(docs))
+
+        req = _request(
+            "tool.chromadb_add",
+            payload={"documents": ["a", "b"], "ids": ["1", "2"]},
+            context={"domain": "matematica"},
+            permissions={"level": "execute_sandboxed"},
+        )
+        response, _latency, log_level = _run(dispatch(req))
+
+        assert response.type == "result"
+        assert response.payload["result"]["documents_added"] == 2
+        assert log_level == "success"
+
+    def test_read_only_permission_is_denied(self):
+        # tool.chromadb_add escreve dados — read_only não deveria bastar,
+        # diferente de skill.rag_search (que só lê).
+        req = _request(
+            "tool.chromadb_add",
+            payload={"documents": ["a"], "ids": ["1"]},
+            context={"domain": "matematica"},
+            permissions={"level": "read_only"},
+        )
+        response, _latency, _log = _run(dispatch(req))
+        assert response.payload["error_code"] == ErrorCode.PERMISSION_DENIED.value
+
+    def test_mismatched_documents_and_ids_length_returns_invalid_input(self):
+        req = _request(
+            "tool.chromadb_add",
+            payload={"documents": ["a", "b"], "ids": ["1"]},
+            context={"domain": "matematica"},
+            permissions={"level": "execute_sandboxed"},
+        )
+        response, _latency, _log = _run(dispatch(req))
+        assert response.payload["error_code"] == ErrorCode.INVALID_INPUT.value
+
+    def test_missing_domain_blocked_before_handler_runs(self):
+        req = _request(
+            "tool.chromadb_add",
+            payload={"documents": ["a"], "ids": ["1"]},
+            context={},
+            permissions={"level": "execute_sandboxed"},
+        )
+        response, _latency, _log = _run(dispatch(req))
+        assert response.payload["error_code"] == ErrorCode.INVALID_INPUT.value
