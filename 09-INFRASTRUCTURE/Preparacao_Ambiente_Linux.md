@@ -1,4 +1,3 @@
-.
 # Preparação de Ambiente — Agent OS v2.0 (Linux)
 
 > Ver também: [ADR-0013](./ADR-0013-linux-pop-os-como-plataforma-de-referencia.md)
@@ -197,5 +196,6 @@ up --build`.
 | `permission denied` ao rodar `docker` sem `sudo` | Usuário não está no grupo `docker`, ou sessão não recarregou | `sudo usermod -aG docker $USER` + `newgrp docker` (ou logout/login) |
 | `could not select device driver "" with capabilities: [[gpu]]` | `nvidia-container-toolkit` instalado mas runtime não configurado no Docker | `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` |
 | Container não alcança o LM Studio no host | `host.docker.internal` não resolvendo | Confirmar `extra_hosts: host.docker.internal:host-gateway` no serviço e Docker Engine ≥ 20.10 (`docker version`) |
+| `sqlite3.OperationalError: unable to open database file` ao subir `agent-os-api` | Bind mount de `./data/sqlite:/data` criado pelo Docker como root no primeiro `up`; o usuário não-root do container (`agentos`, uid 1000) não tem permissão de escrita | Antes do primeiro `docker compose up`: `mkdir -p data/sqlite data/vector-db` com seu próprio usuário — o bind mount preserva a propriedade da pasta do host, não a do `chown` feito dentro da imagem |
 | AppImage do LM Studio não abre | Falta `libfuse2` | `sudo apt install libfuse2` |
 | `nvidia-smi` não reconhece a GPU após instalar driver | Reboot pendente | `sudo reboot` |

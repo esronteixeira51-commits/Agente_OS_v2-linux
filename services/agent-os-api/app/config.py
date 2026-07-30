@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     ocr_endpoint: str = "http://ocr-worker:8090"
     transcription_endpoint: str = "http://transcription-worker:8095"
 
+    # Identificador do modelo tal como o LM Studio o expõe em
+    # /v1/models — precisa bater exatamente (LM Studio silenciosamente
+    # troca para outro modelo carregado se o nome não for reconhecido,
+    # sem avisar; ver ADR-0013 para o caso real que motivou isso virar
+    # configuração em vez de hardcode dentro de app.agents).
+    default_model: str = "qwen/qwen3-8b"
+
     log_level: str = "INFO"
 
     # Calibrado para RTX 5050 8GB — geração mais lenta quando o modelo

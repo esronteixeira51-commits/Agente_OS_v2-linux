@@ -35,6 +35,7 @@ import time
 import uuid
 from typing import Optional
 
+from app.config import settings
 from app.dispatcher import DispatchResult, dispatch, register_handler
 from app.schemas import Envelope, ErrorCode, Permissions, make_error, make_result
 
@@ -88,8 +89,15 @@ _RAG_SEARCH_TOOL = {
 
 _RESEARCHER_SYSTEM_PROMPT = (
     "Você é um assistente de pesquisa inteligente. "
-    "Use as ferramentas disponíveis quando necessário para responder com precisão. "
-    "Para cálculos matemáticos, SEMPRE use a ferramenta calculator — nunca calcule mentalmente."
+    "Use as ferramentas disponíveis quando necessário para responder com precisão.\n\n"
+    "REGRA OBRIGATÓRIA E SEM EXCEÇÃO sobre cálculos: para QUALQUER operação "
+    "aritmética — mesmo simples, mesmo que você tenha certeza do resultado — "
+    "você DEVE chamar a ferramenta calculator. Isso vale mesmo durante seu "
+    "raciocínio interno: não calcule mentalmente 'só para conferir' e decida "
+    "depois que não precisa da ferramenta. O resultado de um cálculo feito "
+    "por você mentalmente NUNCA é aceito como resposta final, mesmo que "
+    "esteja correto — o sistema exige que o número venha da ferramenta, não "
+    "do seu raciocínio."
 )
 
 
@@ -104,7 +112,7 @@ async def _call_llm_with_tools(
     motor de LLM por aqui, nunca chamando app.llm_client diretamente."""
     payload: dict = {
         "messages": messages,
-        "model": "lmstudio-community/qwen2.5-7b-instruct",
+        "model": settings.default_model,
         "temperature": temperature,
     }
     if tools:

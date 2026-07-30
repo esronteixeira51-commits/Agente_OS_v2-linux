@@ -17,6 +17,9 @@ dist/
 *.db
 *.sqlite3
 
+# Dados de runtime dos volumes do docker-compose (SQLite, ChromaDB)
+/data/
+
 # Editor / SO
 .vscode/
 .idea/
